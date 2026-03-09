@@ -20,11 +20,10 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '20'
-          cache: 'npm'
 
       - name: Install dependencies
-        run: npm ci
-
+        run: npm install
+        
       - name: Run pracc sync
         env:
           TRACKER_URL:      ${{ secrets.TRACKER_URL }}
