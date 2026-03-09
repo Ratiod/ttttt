@@ -98,7 +98,7 @@ async function scrapePracc() {
       const btn = btns.find(b => b.textContent.trim().toUpperCase().includes('LOGIN WITH EMAIL'));
       if (btn) btn.click();
     });
-    await page.waitForTimeout(1500);
+    await new Promise(r => setTimeout(r, 1500));
     await page.screenshot({ path: "pracc-login-2.png", fullPage: true });
 
     // Step 2: Fill email
@@ -131,7 +131,7 @@ async function scrapePracc() {
     // ── Step 2: Go to Matches ──
     console.log("📅 Loading matches calendar...");
     await page.goto("https://pracc.com/matches", { waitUntil: "networkidle2", timeout: 30000 });
-    await page.waitForTimeout(3000);
+    await new Promise(r => setTimeout(r, 3000));
 
     const allMatches = [];
     const today = new Date();
@@ -173,7 +173,7 @@ async function scrapePracc() {
           });
         }
         if (!clicked) console.warn("  ⚠️ Could not find next month button");
-        await page.waitForTimeout(2000);
+        await new Promise(r => setTimeout(r, 2000));
       }
 
       // ── Step 3: Extract matches from the page ──
@@ -283,7 +283,7 @@ async function expandDayCells(page, targetDate) {
       if (!text.match(/\+\d+/)) continue;
 
       await link.click();
-      await page.waitForTimeout(500);
+      await new Promise(r => setTimeout(r, 500));
 
       // Find the popup/modal that appeared
       const popup = await page.$('[class*="popup"], [class*="modal"], [class*="expanded"], [class*="dropdown"]');
@@ -321,7 +321,7 @@ async function expandDayCells(page, targetDate) {
 
       matches.push(...popupMatches);
       await page.keyboard.press("Escape");
-      await page.waitForTimeout(300);
+      await new Promise(r => setTimeout(r, 300));
     } catch (_) {}
   }
   return matches;
