@@ -19,11 +19,13 @@ const CONFIG = {
   PRACC_EMAIL:      process.env.PRACC_EMAIL      || "",
   PRACC_PASSWORD:   process.env.PRACC_PASSWORD   || "",
   MONTHS_AHEAD:     parseInt(process.env.MONTHS_AHEAD || "2"),
-  // Always headless in CI, set DEBUG=true locally to watch the browser
   DEBUG: process.env.DEBUG === "true",
 };
 
 const PRACC_COLOR = "#ff7043";
+
+const MAPS = ["Split","Haven","Bind","Breeze","Fracture","Icebox","Lotus","Abyss","Sunset","Ascent","Pearl","Corrode"];
+const MAP_RX = new RegExp(`^(.+?)\\s*[-–]\\s*(${MAPS.join("|")})$`, "i");
 
 // ── Tracker API helpers ──
 async function getTrackerToken() {
@@ -64,7 +66,220 @@ async function deleteEvent(token, id) {
   });
 }
 
-// ── Pracc scraper ──
+// ── Parse a time+title line ──
+function parseEntryLine(line, dateStr) {
+  const m = line.match(/^(\d{1,2}:\d{2})\s*[-–]\s*(.+)/);
+  if (!m) return null;
+  const time = m[1];
+  const rest = m[2].trim();
+  if (/^\+\d+/.test(rest)) return null; // skip "+N more" lines
+  const mm = rest.match(MAP_RX);
+  const title = mm ? `${mm[1].trim()} — ${mm[2]}` : rest;
+  if (title.length < 2) return null;
+  return { date: dateStr, time, title };
+}
+
+// ── Try to click "next month" button ──
+async function clickNextMonth(page) {
+  const nextSelectors = [
+    'button[aria-label="Next month"]',
+    'button[aria-label="next month"]',
+    '[data-testid="next-month"]',
+    '.fc-next-button',
+    'button:has(svg[data-icon="chevron-right"])',
+  ];
+  for (const sel of nextSelectors) {
+    try { await page.click(sel); return true; } catch (_) {}
+  }
+  // Fallback: find by text/icon
+  const clicked = await page.evaluate(() => {
+    const buttons = Array.from(document.querySelectorAll("button"));
+    const btn = buttons.find(b => {
+      const txt = b.textContent.trim();
+      return txt === ">" || txt === "›" || txt === "→" || b.innerHTML.includes("chevron-right");
+    });
+    if (btn) { btn.click(); return true; }
+    return false;
+  });
+  return clicked;
+}
+
+// ── Scrape all events from a single day popup ──
+async function readPopup(page, dateStr) {
+  return page.evaluate((dateStr, MAP_RX_STR) => {
+    const mapRx = new RegExp(MAP_RX_STR, "i");
+    const results = [];
+
+    // Find the most relevant visible popup/overlay
+    const candidates = Array.from(document.querySelectorAll("*")).filter(el => {
+      if (!el.innerText) return false;
+      const s = window.getComputedStyle(el);
+      const vis = s.display !== "none" && s.visibility !== "hidden" && s.opacity !== "0";
+      if (!vis) return false;
+      const hasTime = /\d{1,2}:\d{2}/.test(el.innerText);
+      const isOverlay = s.position === "absolute" || s.position === "fixed" || parseInt(s.zIndex) > 5;
+      return hasTime && isOverlay && el.offsetWidth > 80 && el.offsetHeight > 30;
+    });
+
+    // Pick the smallest matching element (most specific popup)
+    candidates.sort((a, b) => a.innerText.length - b.innerText.length);
+    const popup = candidates[0];
+    if (!popup) return results;
+
+    // Grab match URLs from anchor tags inside popup
+    const links = Array.from(popup.querySelectorAll("a[href]")).map(a => ({
+      text: a.innerText.trim(),
+      href: a.href,
+    }));
+
+    const lines = popup.innerText.split("\n").map(l => l.trim()).filter(Boolean);
+    for (const line of lines) {
+      const m = line.match(/^(\d{1,2}:\d{2})\s*[-–]\s*(.+)/);
+      if (!m) continue;
+      const time = m[1];
+      const rest = m[2].trim();
+      if (/^\+\d+/.test(rest)) continue;
+      const mm = rest.match(mapRx);
+      const title = mm ? `${mm[1].trim()} — ${mm[2]}` : rest;
+      if (title.length < 2) continue;
+
+      // Try to find the match URL from anchor tags
+      const matchLink = links.find(l =>
+        l.text.includes(time) || l.text.includes(rest.slice(0, 12))
+      );
+
+      results.push({ date: dateStr, time, title, url: matchLink?.href || null });
+    }
+    return results;
+  }, dateStr, MAP_RX.source);
+}
+
+// ── Scrape all events directly from visible calendar cells (no popup needed) ──
+async function scrapeVisibleCells(page, year) {
+  return page.evaluate((yr, MAP_RX_STR) => {
+    const mapRx = new RegExp(MAP_RX_STR, "i");
+    const results = [];
+
+    // Strategy 1: [data-date] cells
+    document.querySelectorAll("[data-date]").forEach(cell => {
+      const date = cell.getAttribute("data-date");
+      if (!date || !date.startsWith(String(yr))) return;
+
+      // Get all anchor/text content inside the cell
+      const links = Array.from(cell.querySelectorAll("a[href]")).map(a => ({
+        text: a.innerText.trim(),
+        href: a.href,
+      }));
+
+      (cell.innerText || "").split("\n").forEach(line => {
+        line = line.trim();
+        const m = line.match(/^(\d{1,2}:\d{2})\s*[-–]\s*(.+)/);
+        if (!m) return;
+        const time = m[1];
+        const rest = m[2].trim();
+        if (/^\+\d+/.test(rest)) return;
+        const mm = rest.match(mapRx);
+        const title = mm ? `${mm[1].trim()} — ${mm[2]}` : rest;
+        if (title.length < 2) return;
+        const matchLink = links.find(l => l.text.includes(time) || l.text.includes(rest.slice(0, 12)));
+        results.push({ date, time, title, url: matchLink?.href || null });
+      });
+    });
+
+    // Strategy 2: elements with data-event or similar attributes
+    const eventSelectors = [
+      "[data-event-id]", "[data-event]", ".fc-event", ".fc-daygrid-event",
+      "[class*='event']", "[class*='match']", "[class*='scrim']",
+    ];
+    for (const sel of eventSelectors) {
+      try {
+        document.querySelectorAll(sel).forEach(el => {
+          const text = el.innerText?.trim();
+          if (!text || !/\d{1,2}:\d{2}/.test(text)) return;
+
+          // Try to find the date from a parent with data-date
+          let dateEl = el.closest("[data-date]");
+          let date = dateEl?.getAttribute("data-date");
+
+          // Fallback: look for date in a sibling or nearby element
+          if (!date) {
+            const parent = el.parentElement;
+            if (parent) {
+              const dateText = parent.querySelector("[data-date]")?.getAttribute("data-date");
+              if (dateText) date = dateText;
+            }
+          }
+          if (!date || !date.startsWith(String(yr))) return;
+
+          const lines = text.split("\n").map(l => l.trim()).filter(Boolean);
+          for (const line of lines) {
+            const m = line.match(/^(\d{1,2}:\d{2})\s*[-–]\s*(.+)/);
+            if (!m) continue;
+            const time = m[1];
+            const rest = m[2].trim();
+            if (/^\+\d+/.test(rest)) continue;
+            const mm = rest.match(mapRx);
+            const title = mm ? `${mm[1].trim()} — ${mm[2]}` : rest;
+            if (title.length < 2) continue;
+            const url = el.closest("a[href]")?.href || el.querySelector("a[href]")?.href || null;
+            results.push({ date, time, title, url });
+          }
+        });
+      } catch (_) {}
+    }
+
+    return results;
+  }, year, MAP_RX.source);
+}
+
+// ── Click every day cell and read its popup to get ALL events (including hidden ones) ──
+async function scrapeByClickingDays(page, targetDate) {
+  const yr = targetDate.getFullYear();
+  const mo = targetDate.getMonth();
+  const daysInMonth = new Date(yr, mo + 1, 0).getDate();
+  const matches = [];
+
+  for (let day = 1; day <= daysInMonth; day++) {
+    const dd = String(day).padStart(2, "0");
+    const mm = String(mo + 1).padStart(2, "0");
+    const dateStr = `${yr}-${mm}-${dd}`;
+
+    try {
+      // Find and click the day cell
+      const clicked = await page.evaluate((dayNum, dateStr) => {
+        // Try [data-date] cell first
+        const byDate = document.querySelector(`[data-date="${dateStr}"]`);
+        if (byDate) { byDate.click(); return true; }
+
+        // Fallback: find by day number text in a calendar cell
+        const allEls = Array.from(document.querySelectorAll("td, [role='gridcell'], [class*='day'], [class*='cell']"));
+        const el = allEls.find(e => {
+          if (e.children.length > 5) return false;
+          return e.textContent.trim().startsWith(String(dayNum));
+        });
+        if (el) { el.click(); return true; }
+        return false;
+      }, day, dateStr);
+
+      if (!clicked) continue;
+      await new Promise(r => setTimeout(r, 600));
+
+      const popupMatches = await readPopup(page, dateStr);
+      if (popupMatches.length > 0) {
+        console.log(`    ${dateStr}: ${popupMatches.length} match(es) from popup`);
+        matches.push(...popupMatches);
+      }
+
+      // Close popup
+      await page.keyboard.press("Escape");
+      await new Promise(r => setTimeout(r, 300));
+    } catch (_) {}
+  }
+
+  return matches;
+}
+
+// ── Main Pracc scraper ──
 async function scrapePracc() {
   console.log("🌐 Launching browser...");
   const browser = await puppeteer.launch({
@@ -72,66 +287,59 @@ async function scrapePracc() {
     args: [
       "--no-sandbox",
       "--disable-setuid-sandbox",
-      "--disable-dev-shm-usage", // important for GitHub Actions
+      "--disable-dev-shm-usage",
       "--disable-gpu",
     ],
   });
 
   const page = await browser.newPage();
   await page.setViewport({ width: 1440, height: 900 });
-  // Pretend to be a real browser
-  await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36");
+  await page.setUserAgent(
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+  );
 
   try {
-    // ── Step 1: Login ──
+    // ── Login ──
     console.log("🔐 Logging into pracc.gg...");
     await page.goto("https://pracc.com/login", { waitUntil: "networkidle2", timeout: 30000 });
+    await page.waitForSelector("button", { timeout: 15000 });
 
-    // Wait for the LOGIN WITH EMAIL button to appear
-    await page.waitForSelector('button', { timeout: 15000 });
-    await page.screenshot({ path: "pracc-login.png", fullPage: true });
+    if (CONFIG.DEBUG) await page.screenshot({ path: "pracc-login.png", fullPage: true });
 
-    // Step 1: Click "LOGIN WITH EMAIL" to reveal the email/password fields
-    console.log("  Clicking LOGIN WITH EMAIL...");
+    // Click "LOGIN WITH EMAIL"
     await page.evaluate(() => {
-      const btns = Array.from(document.querySelectorAll('button'));
-      const btn = btns.find(b => b.textContent.trim().toUpperCase().includes('LOGIN WITH EMAIL'));
+      const btn = Array.from(document.querySelectorAll("button"))
+        .find(b => b.textContent.trim().toUpperCase().includes("LOGIN WITH EMAIL"));
       if (btn) btn.click();
     });
     await new Promise(r => setTimeout(r, 1500));
-    await page.screenshot({ path: "pracc-login-2.png", fullPage: true });
 
-    // Step 2: Fill email
+    // Fill credentials
     await page.waitForSelector('input[type="email"], input[name="email"]', { timeout: 10000 });
     const emailEl = await page.$('input[type="email"]') || await page.$('input[name="email"]');
-    if (!emailEl) throw new Error("Email input not found after clicking LOGIN WITH EMAIL");
+    if (!emailEl) throw new Error("Email input not found");
     await emailEl.click({ clickCount: 3 });
     await emailEl.type(CONFIG.PRACC_EMAIL, { delay: 40 });
-    console.log("  Filled email");
 
-    // Step 3: Fill password
     const pwEl = await page.$('input[type="password"]');
     if (!pwEl) throw new Error("Password input not found");
     await pwEl.click({ clickCount: 3 });
     await pwEl.type(CONFIG.PRACC_PASSWORD, { delay: 40 });
-    console.log("  Filled password");
-
-    // Step 4: Submit via Enter
     await pwEl.press("Enter");
-    await page.waitForNavigation({ waitUntil: "networkidle2", timeout: 20000 }).catch(()=>{});
-    await page.screenshot({ path: "pracc-after-login.png", fullPage: true });
 
-    // Check login succeeded
-    const currentUrl = page.url();
-    if (currentUrl.includes("login")) {
+    await page.waitForNavigation({ waitUntil: "networkidle2", timeout: 20000 }).catch(() => {});
+    if (CONFIG.DEBUG) await page.screenshot({ path: "pracc-after-login.png", fullPage: true });
+
+    if (page.url().includes("login")) {
       throw new Error("pracc.gg login failed — check your PRACC_EMAIL and PRACC_PASSWORD");
     }
     console.log("✓ Logged into pracc.gg");
 
-    // ── Step 2: Go to Matches ──
+    // ── Navigate to Matches ──
     console.log("📅 Loading matches calendar...");
     await page.goto("https://pracc.com/matches", { waitUntil: "networkidle2", timeout: 30000 });
     await new Promise(r => setTimeout(r, 3000));
+    if (CONFIG.DEBUG) await page.screenshot({ path: "pracc-matches.png", fullPage: true });
 
     const allMatches = [];
     const today = new Date();
@@ -140,224 +348,85 @@ async function scrapePracc() {
       const targetDate = new Date(today.getFullYear(), today.getMonth() + mo, 1);
       const monthLabel = targetDate.toLocaleDateString("en-US", { month: "long", year: "numeric" });
       console.log(`\n  📆 Scraping ${monthLabel}...`);
-      if (mo === 0) await page.screenshot({ path: "pracc-matches.png", fullPage: true });
 
-      // Navigate to next month if needed
       if (mo > 0) {
-        // Try common "next month" button selectors
-        const nextSelectors = [
-          'button[aria-label="Next month"]',
-          'button[aria-label="next month"]',
-          '[data-testid="next-month"]',
-          '.fc-next-button',
-          'button:has(svg[data-icon="chevron-right"])',
-          // Generic: button containing > or › near the month header
-        ];
-        let clicked = false;
-        for (const sel of nextSelectors) {
-          try {
-            await page.click(sel);
-            clicked = true;
-            break;
-          } catch (_) {}
-        }
-        if (!clicked) {
-          // Fallback: find button by position (right arrow near month header)
-          clicked = await page.evaluate(() => {
-            const buttons = Array.from(document.querySelectorAll("button"));
-            const nextBtn = buttons.find(b => {
-              const txt = b.textContent.trim();
-              return txt === ">" || txt === "›" || txt === "→" || b.innerHTML.includes("chevron-right");
-            });
-            if (nextBtn) { nextBtn.click(); return true; }
-            return false;
-          });
-        }
-        if (!clicked) console.warn("  ⚠️ Could not find next month button");
+        const moved = await clickNextMonth(page);
+        if (!moved) console.warn("  ⚠️  Could not find next month button");
         await new Promise(r => setTimeout(r, 2000));
       }
 
-      // ── Step 3: Click each "+N more" button, read its popup with date context ──
-      const monthMatches = [];
+      // ── Strategy 1: scrape directly visible calendar cells ──
+      const visibleMatches = await scrapeVisibleCells(page, targetDate.getFullYear());
+      console.log(`    ${visibleMatches.length} match(es) from visible cells`);
 
-      // Count how many "+more" buttons are on the page
+      // ── Strategy 2: click every day cell to reveal hidden/overflow events ──
+      const clickMatches = await scrapeByClickingDays(page, targetDate);
+      console.log(`    ${clickMatches.length} match(es) from day popups`);
+
+      // ── Strategy 3: click any remaining "+N more" buttons ──
       const moreBtnCount = await page.evaluate(() =>
-        Array.from(document.querySelectorAll('*'))
+        Array.from(document.querySelectorAll("*"))
           .filter(el => el.children.length === 0 && /^\+\d+\s*more$/i.test(el.textContent.trim()))
           .length
       );
-      console.log(`    ${moreBtnCount} "+more" buttons to click`);
 
-      for (let i = 0; i < moreBtnCount; i++) {
-        try {
-          await page.evaluate((idx) => {
-            const btns = Array.from(document.querySelectorAll('*'))
-              .filter(el => el.children.length === 0 && /^\+\d+\s*more$/i.test(el.textContent.trim()));
-            if (btns[idx]) btns[idx].click();
-          }, i);
-          await new Promise(r => setTimeout(r, 700));
+      const moreMatches = [];
+      if (moreBtnCount > 0) {
+        console.log(`    Clicking ${moreBtnCount} "+more" button(s)...`);
+        for (let i = 0; i < moreBtnCount; i++) {
+          try {
+            // Re-query each time because DOM can change after popup close
+            const btn = await page.evaluateHandle((idx) => {
+              return Array.from(document.querySelectorAll("*"))
+                .filter(el => el.children.length === 0 && /^\+\d+\s*more$/i.test(el.textContent.trim()))[idx];
+            }, i);
 
-          // Read popup — grab text AND anchor hrefs for match URLs
-          const popup = await page.evaluate(() => {
-            const candidates = Array.from(document.querySelectorAll('*')).filter(el => {
-              if (!el.innerText) return false;
-              const t = el.innerText;
-              return t.match(/[a-z]+,?\s+[a-z]+\s+\d+/i) && t.match(/\d{1,2}:\d{2}/) && el.offsetWidth > 50;
-            });
-            candidates.sort((a,b) => a.innerText.length - b.innerText.length);
-            const el = candidates[0];
-            if (!el) return null;
-            const links = Array.from(el.querySelectorAll('a[href]')).map(a => ({
-              text: a.innerText.trim(),
-              href: a.href
-            }));
-            return { text: el.innerText, links };
-          });
+            if (!btn) continue;
 
-          if (popup) {
-            const months = ["january","february","march","april","may","june","july","august","september","october","november","december"];
-            const lines = popup.text.split("\n").map(l => l.trim()).filter(Boolean);
-            let dateStr = null;
-            for (const line of lines) {
-              const dm = line.match(/([a-z]+),?\s+([a-z]+)\s+(\d+)(?:st|nd|rd|th)?[,\s]+(\d{4})/i);
-              if (dm) {
-                const mi = months.indexOf(dm[2].toLowerCase());
-                if (mi >= 0) dateStr = `${dm[4]}-${String(mi+1).padStart(2,"0")}-${String(parseInt(dm[3])).padStart(2,"0")}`;
-                continue;
-              }
-              const em = line.match(/^(\d{1,2}:\d{2})\s*[-–]\s*(.+)/);
-              if (em && dateStr) {
-                const time = em[1];
-                const rest = em[2].trim();
-                const mm = rest.match(/^(.+?)\s*[-–]\s*(Split|Haven|Bind|Breeze|Fracture|Icebox|Lotus|Abyss|Sunset|Ascent|Pearl|Corrode)$/i);
-                const title = mm ? `${mm[1].trim()} — ${mm[2]}` : rest;
-                const matchLink = popup.links.find(l => l.text.includes(time) || l.text.includes((rest.split(" — ")[0]||"").trim().slice(0,10)));
-                const url = matchLink?.href || null;
-                if (title.length > 1) monthMatches.push({ date: dateStr, time, title, url });
-              }
-            }
+            // Get date context from parent cell
+            const dateStr = await page.evaluate(el => {
+              const cell = el?.closest("[data-date]");
+              return cell ? cell.getAttribute("data-date") : null;
+            }, btn);
+
+            await btn.asElement()?.click();
+            await new Promise(r => setTimeout(r, 700));
+
+            const popupMatches = await readPopup(page, dateStr || "unknown");
+            moreMatches.push(...popupMatches.filter(m => m.date !== "unknown"));
+
+            await page.keyboard.press("Escape");
+            await new Promise(r => setTimeout(r, 400));
+          } catch (e) {
+            console.log(`    +more[${i}] error: ${e.message}`);
           }
-          await page.keyboard.press("Escape");
-          await new Promise(r => setTimeout(r, 400));
-        } catch(e) { console.log(`    +more ${i} error: ${e.message}`); }
+        }
+        console.log(`    ${moreMatches.length} match(es) from "+more" popups`);
       }
 
-      // Also grab visible matches (the ones shown without needing "+more")
-      const visibleMatches = await page.evaluate((yr) => {
-        const results = [];
-        document.querySelectorAll('[data-date]').forEach(cell => {
-          const date = cell.getAttribute('data-date');
-          if (!date || !date.startsWith(String(yr))) return;
-          (cell.innerText || "").split("\n").forEach(line => {
-            line = line.trim();
-            const em = line.match(/^(\d{1,2}:\d{2})\s*[-–]\s*(.+)/);
-            if (!em) return;
-            const rest = em[2].trim();
-            if (/^\+\d+/.test(rest)) return; // skip "+2 more" lines
-            const mm = rest.match(/^(.+?)\s*[-–]\s*(Split|Haven|Bind|Breeze|Fracture|Icebox|Lotus|Abyss|Sunset|Ascent|Pearl|Corrode)$/i);
-            const title = mm ? `${mm[1].trim()} — ${mm[2]}` : rest;
-            if (title.length > 1) results.push({ date, time: em[1], title });
-          });
-        });
-        return results;
-      }, targetDate.getFullYear());
-
-      monthMatches.push(...visibleMatches);
-      console.log(`    Found ${monthMatches.length} matches total`);
-      allMatches.push(...monthMatches);
+      // Merge all 3 strategies for this month
+      allMatches.push(...visibleMatches, ...clickMatches, ...moreMatches);
     }
 
     await browser.close();
 
-    // Final dedup across all months
+    // Deduplicate across all strategies and months
     const seen = new Set();
-    return allMatches.filter(m => {
+    const deduped = allMatches.filter(m => {
       const k = `${m.date}|${m.time}|${m.title}`;
       if (seen.has(k)) return false;
-      seen.add(k); return true;
+      seen.add(k);
+      return true;
     });
 
+    console.log(`\n✓ Total unique matches found: ${deduped.length}`);
+    return deduped;
+
   } catch (err) {
-    if (CONFIG.DEBUG) {
-      await page.screenshot({ path: "pracc-error.png" });
-      console.log("  Screenshot saved to pracc-error.png");
-    }
+    await page.screenshot({ path: "pracc-error.png" }).catch(() => {});
     await browser.close();
     throw err;
   }
-}
-
-async function expandDayCells(page, targetDate) {
-  // Click each calendar day cell to trigger its popup, then read the match list
-  const matches = [];
-  const yr = targetDate.getFullYear();
-  const mo = targetDate.getMonth();
-  const daysInMonth = new Date(yr, mo + 1, 0).getDate();
-
-  for (let day = 1; day <= daysInMonth; day++) {
-    try {
-      const dd = String(day).padStart(2, "0");
-      const mm = String(mo + 1).padStart(2, "0");
-      const dateStr = `${yr}-${mm}-${dd}`;
-
-      // Click the day number cell
-      const clicked = await page.evaluate((dayNum, yr, mo) => {
-        // Find day cells — look for elements containing just the day number
-        const allEls = Array.from(document.querySelectorAll('*'));
-        const dayEl = allEls.find(el => {
-          if (el.children.length > 3) return false;
-          const txt = el.textContent.trim();
-          return txt === String(dayNum) && el.offsetWidth > 20;
-        });
-        if (dayEl) { dayEl.click(); return true; }
-        return false;
-      }, day, yr, mo);
-
-      if (!clicked) continue;
-      await new Promise(r => setTimeout(r, 500));
-
-      // Read the popup — look for the date header "Monday, March 9th 2026" style
-      const popupMatches = await page.evaluate((dateStr) => {
-        const results = [];
-        const months = ["january","february","march","april","may","june","july","august","september","october","november","december"];
-
-        // Find the popup element — it usually contains the date as a header
-        const allEls = Array.from(document.querySelectorAll('*'));
-        const popup = allEls.find(el => {
-          const s = window.getComputedStyle(el);
-          return el.innerText?.includes(":") &&
-                 (s.position === "absolute" || s.position === "fixed" || parseInt(s.zIndex) > 5) &&
-                 el.offsetHeight > 40 && el.offsetWidth > 100;
-        });
-
-        const text = popup ? popup.innerText : "";
-        if (!text) return results;
-
-        const lines = text.split("\n").map(l => l.trim()).filter(Boolean);
-        for (const line of lines) {
-          const entryRx = line.match(/^(\d{1,2}:\d{2})\s*[-–]\s*(.+)/);
-          if (entryRx) {
-            const time = entryRx[1];
-            let rest = entryRx[2].trim();
-            const mapRx = /^(.+?)\s*[-–]\s*(Split|Haven|Bind|Breeze|Fracture|Icebox|Lotus|Abyss|Sunset|Ascent|Pearl|Corrode)$/i;
-            const mapMatch = rest.match(mapRx);
-            const title = mapMatch ? `${mapMatch[1].trim()} — ${mapMatch[2]}` : rest;
-            if (title.length > 1) results.push({ date: dateStr, time, title });
-          }
-        }
-        return results;
-      }, dateStr);
-
-      if (popupMatches.length > 0) {
-        console.log(`    Day ${dateStr}: ${popupMatches.length} matches from popup`);
-        matches.push(...popupMatches);
-      }
-
-      await page.keyboard.press("Escape");
-      await new Promise(r => setTimeout(r, 300));
-    } catch (_) {}
-  }
-  return matches;
 }
 
 // ── Main ──
@@ -400,7 +469,7 @@ async function sync() {
   let added = 0;
   console.log("➕ Syncing matches to tracker...\n");
   for (const m of praccMatches) {
-    if (m.date < today) continue; // skip past matches
+    if (m.date < today) continue;
     const r = await postEvent(token, {
       title: m.title,
       date:  m.date,
