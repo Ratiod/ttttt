@@ -1,11 +1,9 @@
 name: Sync Pracc Matches
 
 on:
-  # Run every day at 8:00 AM UTC (adjust to your timezone)
   schedule:
-    - cron: '0 8 * * *'
+    - cron: '*/5 * * * *'   # every 5 minutes
 
-  # Also lets you trigger it manually from GitHub UI anytime
   workflow_dispatch:
 
 jobs:
@@ -20,10 +18,9 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '20'
-          cache: 'npm'
 
       - name: Install dependencies
-        run: npm ci
+        run: npm install
 
       - name: Run pracc sync
         env:
@@ -34,3 +31,11 @@ jobs:
           PRACC_PASSWORD:   ${{ secrets.PRACC_PASSWORD }}
           MONTHS_AHEAD:     "2"
         run: node sync-pracc.js
+
+      - name: Upload screenshots (for debugging)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pracc-screenshots
+          path: "*.png"
+          if-no-files-found: ignore
