@@ -232,12 +232,16 @@ async function scrapeVisibleCells(page, year) {
   }, year, MAP_RX.source);
 }
 
-// ── Click every day cell and read its popup to get ALL events (including hidden ones) ──
+// ── Click every day cell and read its popup ONLY if it contains that day's events ──
 async function scrapeByClickingDays(page, targetDate) {
   const yr = targetDate.getFullYear();
   const mo = targetDate.getMonth();
   const daysInMonth = new Date(yr, mo + 1, 0).getDate();
   const matches = [];
+
+  // Dismiss any leftover popup before starting
+  await page.keyboard.press("Escape");
+  await new Promise(r => setTimeout(r, 300));
 
   for (let day = 1; day <= daysInMonth; day++) {
     const dd = String(day).padStart(2, "0");
@@ -245,13 +249,9 @@ async function scrapeByClickingDays(page, targetDate) {
     const dateStr = `${yr}-${mm}-${dd}`;
 
     try {
-      // Find and click the day cell
       const clicked = await page.evaluate((dayNum, dateStr) => {
-        // Try [data-date] cell first
         const byDate = document.querySelector(`[data-date="${dateStr}"]`);
         if (byDate) { byDate.click(); return true; }
-
-        // Fallback: find by day number text in a calendar cell
         const allEls = Array.from(document.querySelectorAll("td, [role='gridcell'], [class*='day'], [class*='cell']"));
         const el = allEls.find(e => {
           if (e.children.length > 5) return false;
@@ -264,15 +264,41 @@ async function scrapeByClickingDays(page, targetDate) {
       if (!clicked) continue;
       await new Promise(r => setTimeout(r, 600));
 
+      // Validate the popup actually belongs to this specific day
+      // by checking it mentions both the month name AND this day number
+      const popupValid = await page.evaluate((day, mo) => {
+        const months = ["january","february","march","april","may","june","july","august","september","october","november","december"];
+        const monthName = months[mo];
+        const candidates = Array.from(document.querySelectorAll("*")).filter(el => {
+          if (!el.innerText) return false;
+          const s = window.getComputedStyle(el);
+          if (s.display === "none" || s.visibility === "hidden" || s.opacity === "0") return false;
+          const isOverlay = s.position === "absolute" || s.position === "fixed" || parseInt(s.zIndex) > 5;
+          return isOverlay && el.offsetWidth > 80 && el.offsetHeight > 30;
+        });
+        return candidates.some(el => {
+          const t = el.innerText.toLowerCase();
+          const hasMonth = t.includes(monthName);
+          const hasDay = new RegExp(`\\b${day}\\b`).test(t);
+          return hasMonth && hasDay && /\d{1,2}:\d{2}/.test(t);
+        });
+      }, day, mo);
+
+      if (!popupValid) {
+        await page.keyboard.press("Escape");
+        await new Promise(r => setTimeout(r, 200));
+        continue;
+      }
+
       const popupMatches = await readPopup(page, dateStr);
       if (popupMatches.length > 0) {
         console.log(`    ${dateStr}: ${popupMatches.length} match(es) from popup`);
         matches.push(...popupMatches);
       }
 
-      // Close popup
+      // Always close before moving to next day
       await page.keyboard.press("Escape");
-      await new Promise(r => setTimeout(r, 300));
+      await new Promise(r => setTimeout(r, 400));
     } catch (_) {}
   }
 
