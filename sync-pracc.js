@@ -197,23 +197,26 @@ async function scrapePracc() {
           }, i);
           await new Promise(r => setTimeout(r, 700));
 
-          // Read popup — it always contains the date header + all matches for that day
+          // Read popup — grab text AND anchor hrefs for match URLs
           const popup = await page.evaluate(() => {
-            // The popup pracc uses contains a bold date like "Monday, March 9th 2026"
-            // Find the smallest element that contains both a date and a time
             const candidates = Array.from(document.querySelectorAll('*')).filter(el => {
               if (!el.innerText) return false;
               const t = el.innerText;
               return t.match(/[a-z]+,?\s+[a-z]+\s+\d+/i) && t.match(/\d{1,2}:\d{2}/) && el.offsetWidth > 50;
             });
-            // Pick smallest matching element (most specific)
             candidates.sort((a,b) => a.innerText.length - b.innerText.length);
-            return candidates[0]?.innerText || null;
+            const el = candidates[0];
+            if (!el) return null;
+            const links = Array.from(el.querySelectorAll('a[href]')).map(a => ({
+              text: a.innerText.trim(),
+              href: a.href
+            }));
+            return { text: el.innerText, links };
           });
 
           if (popup) {
             const months = ["january","february","march","april","may","june","july","august","september","october","november","december"];
-            const lines = popup.split("\n").map(l => l.trim()).filter(Boolean);
+            const lines = popup.text.split("\n").map(l => l.trim()).filter(Boolean);
             let dateStr = null;
             for (const line of lines) {
               const dm = line.match(/([a-z]+),?\s+([a-z]+)\s+(\d+)(?:st|nd|rd|th)?[,\s]+(\d{4})/i);
@@ -228,7 +231,9 @@ async function scrapePracc() {
                 const rest = em[2].trim();
                 const mm = rest.match(/^(.+?)\s*[-–]\s*(Split|Haven|Bind|Breeze|Fracture|Icebox|Lotus|Abyss|Sunset|Ascent|Pearl|Corrode)$/i);
                 const title = mm ? `${mm[1].trim()} — ${mm[2]}` : rest;
-                if (title.length > 1) monthMatches.push({ date: dateStr, time, title });
+                const matchLink = popup.links.find(l => l.text.includes(time) || l.text.includes((rest.split(" — ")[0]||"").trim().slice(0,10)));
+                const url = matchLink?.href || null;
+                if (title.length > 1) monthMatches.push({ date: dateStr, time, title, url });
               }
             }
           }
@@ -402,6 +407,7 @@ async function sync() {
       time:  m.time,
       cat:   "Pracc",
       color: PRACC_COLOR,
+      url:   m.url || null,
     });
     if (r.id) {
       console.log(`  ✓ ${m.date}  ${m.time}  ${m.title}`);
