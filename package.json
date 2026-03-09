@@ -1,0 +1,13 @@
+{
+  "name": "pracc-racker-sync",
+  "version": "1.0.0",
+  "description": "Auto-syncs pracc.gg matches to Racker tracker calendar",
+  "main": "sync-pracc.js",
+  "scripts": {
+    "sync": "node sync-pracc.js",
+    "sync:debug": "DEBUG=true node sync-pracc.js"
+  },
+  "dependencies": {
+    "puppeteer": "^22.0.0"
+  }
+}
