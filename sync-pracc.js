@@ -87,15 +87,39 @@ async function scrapePracc() {
     console.log("🔐 Logging into pracc.gg...");
     await page.goto("https://pracc.com/login", { waitUntil: "networkidle2", timeout: 30000 });
 
-    // Wait for email field
-    await page.waitForSelector('input[type="email"], input[name="email"]', { timeout: 15000 });
-    await page.type('input[type="email"]', CONFIG.PRACC_EMAIL, { delay: 40 });
-    await page.type('input[type="password"]', CONFIG.PRACC_PASSWORD, { delay: 40 });
+    // Wait for the LOGIN WITH EMAIL button to appear
+    await page.waitForSelector('button', { timeout: 15000 });
+    await page.screenshot({ path: "pracc-login.png", fullPage: true });
 
-    await Promise.all([
-      page.waitForNavigation({ waitUntil: "networkidle2", timeout: 20000 }),
-      page.click('button[type="submit"]'),
-    ]);
+    // Step 1: Click "LOGIN WITH EMAIL" to reveal the email/password fields
+    console.log("  Clicking LOGIN WITH EMAIL...");
+    await page.evaluate(() => {
+      const btns = Array.from(document.querySelectorAll('button'));
+      const btn = btns.find(b => b.textContent.trim().toUpperCase().includes('LOGIN WITH EMAIL'));
+      if (btn) btn.click();
+    });
+    await page.waitForTimeout(1500);
+    await page.screenshot({ path: "pracc-login-2.png", fullPage: true });
+
+    // Step 2: Fill email
+    await page.waitForSelector('input[type="email"], input[name="email"]', { timeout: 10000 });
+    const emailEl = await page.$('input[type="email"]') || await page.$('input[name="email"]');
+    if (!emailEl) throw new Error("Email input not found after clicking LOGIN WITH EMAIL");
+    await emailEl.click({ clickCount: 3 });
+    await emailEl.type(CONFIG.PRACC_EMAIL, { delay: 40 });
+    console.log("  Filled email");
+
+    // Step 3: Fill password
+    const pwEl = await page.$('input[type="password"]');
+    if (!pwEl) throw new Error("Password input not found");
+    await pwEl.click({ clickCount: 3 });
+    await pwEl.type(CONFIG.PRACC_PASSWORD, { delay: 40 });
+    console.log("  Filled password");
+
+    // Step 4: Submit via Enter
+    await pwEl.press("Enter");
+    await page.waitForNavigation({ waitUntil: "networkidle2", timeout: 20000 }).catch(()=>{});
+    await page.screenshot({ path: "pracc-after-login.png", fullPage: true });
 
     // Check login succeeded
     const currentUrl = page.url();
