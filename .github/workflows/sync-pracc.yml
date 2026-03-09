@@ -32,12 +32,14 @@ jobs:
           PRACC_EMAIL:      ${{ secrets.PRACC_EMAIL }}
           PRACC_PASSWORD:   ${{ secrets.PRACC_PASSWORD }}
           MONTHS_AHEAD:     "2"
-        run: node sync-pracc.js
+        run: node sync-pracc-debug.js
 
-      - name: Upload screenshots (for debugging)
+      - name: Upload debug files
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: pracc-screenshots
-          path: "*.png"
+          name: pracc-debug
+          path: |
+            *.png
+            *.html
           if-no-files-found: ignore
