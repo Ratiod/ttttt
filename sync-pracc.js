@@ -85,7 +85,7 @@ async function scrapePracc() {
   try {
     // ── Step 1: Login ──
     console.log("🔐 Logging into pracc.gg...");
-    await page.goto("https://app.pracc.com/login", { waitUntil: "networkidle2", timeout: 30000 });
+    await page.goto("https://www.pracc.com/login", { waitUntil: "networkidle2", timeout: 30000 });
 
     // Wait for email field
     await page.waitForSelector('input[type="email"], input[name="email"]', { timeout: 15000 });
@@ -106,7 +106,7 @@ async function scrapePracc() {
 
     // ── Step 2: Go to Matches ──
     console.log("📅 Loading matches calendar...");
-    await page.goto("https://app.pracc.com/matches", { waitUntil: "networkidle2", timeout: 30000 });
+    await page.goto("https://www.pracc.com/matches", { waitUntil: "networkidle2", timeout: 30000 });
     await page.waitForTimeout(3000);
 
     const allMatches = [];
