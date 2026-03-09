@@ -312,6 +312,69 @@ async function scrapePracc() {
     console.log("  Time elements found on page:");
     timeEls.forEach(e => console.log("   ", JSON.stringify(e)));
 
+    // Deep debug: for first rbc-event-content, log full ancestor chain with classes + text
+    const ancestorInfo = await page.evaluate(() => {
+      const el = document.querySelector(".rbc-event-content");
+      if (!el) return "no rbc-event-content found";
+      const chain = [];
+      let cur = el.parentElement;
+      while (cur && cur !== document.body) {
+        const dateCells = Array.from(cur.querySelectorAll(".rbc-date-cell")).map(d => ({
+          classes: d.className,
+          text: d.innerText?.trim().slice(0,30),
+          ariaLabel: d.getAttribute("aria-label"),
+          dataDate: d.getAttribute("data-date"),
+          linkText: d.querySelector("a,button")?.textContent?.trim(),
+        }));
+        chain.push({
+          tag: cur.tagName,
+          classes: cur.className?.slice(0,80),
+          dataDate: cur.getAttribute("data-date"),
+          childDateCells: dateCells.length,
+          dateCellSamples: dateCells.slice(0,3),
+        });
+        if (dateCells.length > 0) break;
+        cur = cur.parentElement;
+      }
+      return chain;
+    });
+    console.log("  Ancestor chain of first event:");
+    console.log(JSON.stringify(ancestorInfo, null, 2));
+
+    // Dump the full ancestor chain for the first rbc-event-content so we can see the structure
+    const ancestorDump = await page.evaluate(() => {
+      const el = document.querySelector(".rbc-event-content");
+      if (!el) return "no rbc-event-content found";
+      let node = el;
+      const chain = [];
+      for (let i = 0; i < 12; i++) {
+        if (!node) break;
+        const dateCells = Array.from(node.querySelectorAll(".rbc-date-cell")).map(dc => ({
+          classes: dc.className,
+          text: dc.innerText?.trim(),
+          dataDate: dc.getAttribute("data-date"),
+          ariaLabel: dc.getAttribute("aria-label"),
+          childA: dc.querySelector("a,button")?.textContent?.trim(),
+        }));
+        chain.push({
+          tag: node.tagName,
+          classes: node.className?.toString().slice(0, 80),
+          dataDate: node.getAttribute?.("data-date"),
+          ariaLabel: node.getAttribute?.("aria-label"),
+          offsetLeft: node.offsetLeft,
+          offsetWidth: node.offsetWidth,
+          dateCellsFound: dateCells.length,
+          dateCells,
+        });
+        node = node.parentElement;
+      }
+      return chain;
+    });
+    console.log("\n  Ancestor chain of first event:");
+    (Array.isArray(ancestorDump) ? ancestorDump : []).forEach((a, i) =>
+      console.log(`    [${i}]`, JSON.stringify(a))
+    );
+
     const allMatches = [];
     const today = new Date();
 
