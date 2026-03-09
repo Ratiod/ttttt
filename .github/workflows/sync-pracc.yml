@@ -20,10 +20,11 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '20'
+          cache: 'npm'
 
       - name: Install dependencies
-        run: npm install
-        
+        run: npm ci
+
       - name: Run pracc sync
         env:
           TRACKER_URL:      ${{ secrets.TRACKER_URL }}
@@ -33,3 +34,11 @@ jobs:
           PRACC_PASSWORD:   ${{ secrets.PRACC_PASSWORD }}
           MONTHS_AHEAD:     "2"
         run: node sync-pracc.js
+
+      - name: Upload screenshots (for debugging)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pracc-screenshots
+          path: "*.png"
+          if-no-files-found: ignore
