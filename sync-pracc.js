@@ -14,7 +14,7 @@ const CONFIG = {
   TRACKER_PASSWORD: process.env.TRACKER_PASSWORD || "",
   PRACC_EMAIL:      process.env.PRACC_EMAIL      || "",
   PRACC_PASSWORD:   process.env.PRACC_PASSWORD   || "",
-  MONTHS_AHEAD:     parseInt(process.env.MONTHS_AHEAD || "2"),
+  MONTHS_AHEAD:     0, // current month only
   DEBUG:            process.env.DEBUG === "true",
 };
 
@@ -65,10 +65,22 @@ async function clickNextMonth(page) {
     const toolbar = document.querySelector(".rbc-toolbar");
     if (toolbar) {
       const btns = Array.from(toolbar.querySelectorAll("button"));
-      const nextBtn = btns.find(b => {
+      // rbc toolbar order is typically: [Back] [Today] [Next]
+      // Try by text first
+      let nextBtn = btns.find(b => {
         const t = b.textContent.trim().toLowerCase();
         return t === "next" || t === ">" || t === "›" || t === "→";
-      }) || btns[btns.length - 1];
+      });
+      // Fallback: last button in the first button group
+      if (!nextBtn) {
+        const groups = toolbar.querySelectorAll(".rbc-btn-group");
+        const firstGroup = groups[0];
+        if (firstGroup) {
+          const groupBtns = Array.from(firstGroup.querySelectorAll("button"));
+          nextBtn = groupBtns[groupBtns.length - 1];
+        }
+      }
+      if (!nextBtn) nextBtn = btns[btns.length - 1];
       if (nextBtn) { nextBtn.click(); return true; }
     }
     return false;
@@ -136,22 +148,32 @@ async function scrapeMonth(page, targetDate) {
 
       // Now find all event segments in the remaining rows of this week
       rows.slice(1).forEach(evRow => {
-        evRow.querySelectorAll(".rbc-row-segment").forEach(segment => {
+        const allSegments = Array.from(evRow.querySelectorAll(":scope > .rbc-row-segment"));
+        allSegments.forEach(segment => {
           const eventContent = segment.querySelector(".rbc-event-content");
           if (!eventContent) return;
 
           const text = eventContent.innerText?.trim();
           if (!text || !/^\d{1,2}:\d{2}/.test(text)) return;
 
-          // Determine column from offsetLeft
-          const segLeft = segment.offsetLeft;
-          const colIdx = Math.min(Math.round(segLeft / colWidth), 6);
+          // Use the segment's index position within the row to find its column.
+          // Each rbc-row-segment has a style like "left: X%; width: Y%"
+          // Parse left% to get column index (each column = 100/7 %)
+          const style = segment.getAttribute("style") || "";
+          const leftMatch = style.match(/left:\s*([\d.]+)%/);
+          let colIdx = 0;
+          if (leftMatch) {
+            colIdx = Math.round(parseFloat(leftMatch[1]) / (100 / 7));
+          } else {
+            // Fallback: use index in parent
+            colIdx = allSegments.indexOf(segment);
+          }
+          colIdx = Math.max(0, Math.min(colIdx, 6));
 
-          // Try exact column, then scan neighbors (events can span columns)
+          // Try exact column, then scan neighbors
           let dateStr = colToDate[colIdx];
           if (!dateStr) {
-            // Try nearest available column
-            for (let delta = 1; delta <= 3; delta++) {
+            for (let delta = 1; delta <= 6; delta++) {
               if (colToDate[colIdx - delta]) { dateStr = colToDate[colIdx - delta]; break; }
               if (colToDate[colIdx + delta]) { dateStr = colToDate[colIdx + delta]; break; }
             }
@@ -272,7 +294,10 @@ async function scrapePracc() {
 
       if (mo > 0) {
         const moved = await clickNextMonth(page);
-        if (!moved) console.warn("  ⚠️  Could not find next month button");
+        if (!moved) {
+          console.warn("  ⚠️  Could not find next month button — stopping here");
+          break;
+        }
         await new Promise(r => setTimeout(r, 2000));
       }
 
