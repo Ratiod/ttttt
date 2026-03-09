@@ -177,68 +177,88 @@ async function scrapePracc() {
         await new Promise(r => setTimeout(r, 2000));
       }
 
-      // ── Step 3: Click every day cell to open its popup and read matches ──
-      // This is the most reliable approach since pracc hides matches behind "+N more"
-      const daysInMonth = new Date(targetDate.getFullYear(), targetDate.getMonth() + 1, 0).getDate();
+      // ── Step 3: Click each "+N more" button, read its popup with date context ──
       const monthMatches = [];
 
-      for (let day = 1; day <= daysInMonth; day++) {
+      // Count how many "+more" buttons are on the page
+      const moreBtnCount = await page.evaluate(() =>
+        Array.from(document.querySelectorAll('*'))
+          .filter(el => el.children.length === 0 && /^\+\d+\s*more$/i.test(el.textContent.trim()))
+          .length
+      );
+      console.log(`    ${moreBtnCount} "+more" buttons to click`);
+
+      for (let i = 0; i < moreBtnCount; i++) {
         try {
-          const dd = String(day).padStart(2, "0");
-          const mm = String(targetDate.getMonth() + 1).padStart(2, "0");
-          const dateStr = `${targetDate.getFullYear()}-${mm}-${dd}`;
+          await page.evaluate((idx) => {
+            const btns = Array.from(document.querySelectorAll('*'))
+              .filter(el => el.children.length === 0 && /^\+\d+\s*more$/i.test(el.textContent.trim()));
+            if (btns[idx]) btns[idx].click();
+          }, i);
+          await new Promise(r => setTimeout(r, 700));
 
-          // Click the day cell
-          await page.evaluate((dayNum) => {
-            const allEls = Array.from(document.querySelectorAll('td, div, span'));
-            // Find the element that contains just this day number
-            const el = allEls.find(el => {
-              const txt = el.textContent.trim();
-              return (txt === String(dayNum) || txt === String(dayNum).padStart(2,"0")) &&
-                     el.children.length <= 1 && el.offsetWidth > 15 && el.offsetHeight > 10;
+          // Read popup — it always contains the date header + all matches for that day
+          const popup = await page.evaluate(() => {
+            // The popup pracc uses contains a bold date like "Monday, March 9th 2026"
+            // Find the smallest element that contains both a date and a time
+            const candidates = Array.from(document.querySelectorAll('*')).filter(el => {
+              if (!el.innerText) return false;
+              const t = el.innerText;
+              return t.match(/[a-z]+,?\s+[a-z]+\s+\d+/i) && t.match(/\d{1,2}:\d{2}/) && el.offsetWidth > 50;
             });
-            if (el) el.click();
-          }, day);
-
-          await new Promise(r => setTimeout(r, 500));
-
-          // Read popup text — popup shows "Monday, March 9th 2026" then match lines
-          const popupText = await page.evaluate(() => {
-            const allEls = Array.from(document.querySelectorAll('*'));
-            // Find popup: absolutely/fixed positioned, visible, contains time patterns
-            const popup = allEls.find(el => {
-              if (!el.innerText || el.innerText.length < 10) return false;
-              if (!el.innerText.match(/\d{1,2}:\d{2}/)) return false;
-              const s = window.getComputedStyle(el);
-              const z = parseInt(s.zIndex) || 0;
-              return (s.position === "absolute" || s.position === "fixed" || z > 5) &&
-                     el.offsetHeight > 40 && el.offsetWidth > 80;
-            });
-            return popup ? popup.innerText : "";
+            // Pick smallest matching element (most specific)
+            candidates.sort((a,b) => a.innerText.length - b.innerText.length);
+            return candidates[0]?.innerText || null;
           });
 
-          if (popupText) {
-            const lines = popupText.split("\n").map(l => l.trim()).filter(Boolean);
+          if (popup) {
+            const months = ["january","february","march","april","may","june","july","august","september","october","november","december"];
+            const lines = popup.split("\n").map(l => l.trim()).filter(Boolean);
+            let dateStr = null;
             for (const line of lines) {
-              const entryRx = line.match(/^(\d{1,2}:\d{2})\s*[-–]\s*(.+)/);
-              if (entryRx) {
-                const time = entryRx[1];
-                let rest = entryRx[2].trim();
-                const mapRx = /^(.+?)\s*[-–]\s*(Split|Haven|Bind|Breeze|Fracture|Icebox|Lotus|Abyss|Sunset|Ascent|Pearl|Corrode)$/i;
-                const mapMatch = rest.match(mapRx);
-                const title = mapMatch ? `${mapMatch[1].trim()} — ${mapMatch[2]}` : rest;
+              const dm = line.match(/([a-z]+),?\s+([a-z]+)\s+(\d+)(?:st|nd|rd|th)?[,\s]+(\d{4})/i);
+              if (dm) {
+                const mi = months.indexOf(dm[2].toLowerCase());
+                if (mi >= 0) dateStr = `${dm[4]}-${String(mi+1).padStart(2,"0")}-${String(parseInt(dm[3])).padStart(2,"0")}`;
+                continue;
+              }
+              const em = line.match(/^(\d{1,2}:\d{2})\s*[-–]\s*(.+)/);
+              if (em && dateStr) {
+                const time = em[1];
+                const rest = em[2].trim();
+                const mm = rest.match(/^(.+?)\s*[-–]\s*(Split|Haven|Bind|Breeze|Fracture|Icebox|Lotus|Abyss|Sunset|Ascent|Pearl|Corrode)$/i);
+                const title = mm ? `${mm[1].trim()} — ${mm[2]}` : rest;
                 if (title.length > 1) monthMatches.push({ date: dateStr, time, title });
               }
             }
           }
-
-          // Close popup
           await page.keyboard.press("Escape");
-          await new Promise(r => setTimeout(r, 200));
-        } catch (_) {}
+          await new Promise(r => setTimeout(r, 400));
+        } catch(e) { console.log(`    +more ${i} error: ${e.message}`); }
       }
 
-      console.log(`    Found ${monthMatches.length} matches`);
+      // Also grab visible matches (the ones shown without needing "+more")
+      const visibleMatches = await page.evaluate((yr) => {
+        const results = [];
+        document.querySelectorAll('[data-date]').forEach(cell => {
+          const date = cell.getAttribute('data-date');
+          if (!date || !date.startsWith(String(yr))) return;
+          (cell.innerText || "").split("\n").forEach(line => {
+            line = line.trim();
+            const em = line.match(/^(\d{1,2}:\d{2})\s*[-–]\s*(.+)/);
+            if (!em) return;
+            const rest = em[2].trim();
+            if (/^\+\d+/.test(rest)) return; // skip "+2 more" lines
+            const mm = rest.match(/^(.+?)\s*[-–]\s*(Split|Haven|Bind|Breeze|Fracture|Icebox|Lotus|Abyss|Sunset|Ascent|Pearl|Corrode)$/i);
+            const title = mm ? `${mm[1].trim()} — ${mm[2]}` : rest;
+            if (title.length > 1) results.push({ date, time: em[1], title });
+          });
+        });
+        return results;
+      }, targetDate.getFullYear());
+
+      monthMatches.push(...visibleMatches);
+      console.log(`    Found ${monthMatches.length} matches total`);
       allMatches.push(...monthMatches);
     }
 
