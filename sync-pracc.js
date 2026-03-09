@@ -74,6 +74,10 @@ function parseLine(line, dateStr) {
 // ── Try clicking "next month" ──
 async function clickNextMonth(page) {
   const selectors = [
+    // React Big Calendar
+    '.rbc-toolbar button.rbc-next',
+    '.rbc-toolbar button:last-child',
+    // Other common selectors
     'button[aria-label="Next month"]', 'button[aria-label="next month"]',
     '[data-testid="next-month"]', '.fc-next-button',
     'button:has(svg[data-icon="chevron-right"])',
@@ -82,6 +86,18 @@ async function clickNextMonth(page) {
     try { await page.click(sel); return true; } catch (_) {}
   }
   return page.evaluate(() => {
+    // rbc toolbar: "Back", "Today", "Next" — find the Next button
+    const toolbar = document.querySelector(".rbc-toolbar");
+    if (toolbar) {
+      const btns = Array.from(toolbar.querySelectorAll("button"));
+      // Next is typically the last button in the left group
+      const nextBtn = btns.find(b => {
+        const t = b.textContent.trim().toLowerCase();
+        return t === "next" || t === ">" || t === "›" || t === "→";
+      }) || btns[btns.length - 1];
+      if (nextBtn) { nextBtn.click(); return true; }
+    }
+    // Fallback generic
     const btn = Array.from(document.querySelectorAll("button")).find(b => {
       const t = b.textContent.trim();
       return t === ">" || t === "›" || t === "→" || b.innerHTML.includes("chevron-right");
@@ -130,56 +146,106 @@ async function readOpenPopup(page, dateStr) {
   }, dateStr, MAP_RX.source);
 }
 
-// ── Scrape one month ──
-// Approach: read all event elements directly from the DOM (covers visible events),
-// then click only "+N more" buttons for overflow events (using the data-date of their
-// parent cell so we always know the correct date).
+// ── Scrape one month using React Big Calendar (rbc-*) classes ──
 async function scrapeMonth(page, targetDate) {
   const yr = targetDate.getFullYear();
   const mo = targetDate.getMonth();
   const matches = [];
 
-  // ── Pass 1: read every event element directly from the calendar DOM ──
+  // ── Pass 1: read all rbc-event-content elements and resolve their date
+  // from the parent rbc-month-row / rbc-date-cell structure ──
   const domMatches = await page.evaluate((yr, mo, MAP_RX_STR) => {
     const mapRx = new RegExp(MAP_RX_STR, "i");
     const results = [];
     const seen = new Set();
 
-    // Collect all [data-date] cells for this month
-    document.querySelectorAll("[data-date]").forEach(cell => {
-      const date = cell.getAttribute("data-date");
+    // Build a map of column-index → date for this calendar view.
+    // rbc-month-header has rbc-header cells (Sun Mon Tue ...) — 7 columns.
+    // rbc-month-row contains rbc-date-cell elements each with an <a> or button
+    // whose text is the day number. We also look for data-date or aria-label.
+    const getDateForCell = (eventEl) => {
+      // Walk up to find the rbc-month-row
+      const row = eventEl.closest(".rbc-month-row, .rbc-week-row, [class*=rbc-row]");
+      if (!row) return null;
+
+      // Find all date cells in this row
+      const dateCells = Array.from(row.querySelectorAll(".rbc-date-cell, [class*=date-cell]"));
+      if (dateCells.length === 0) return null;
+
+      // Find which rbc-day-bg column the event is in
+      const bgSlots = Array.from(row.querySelectorAll(".rbc-day-bg, [class*=day-bg]"));
+      if (bgSlots.length === 0) return null;
+
+      // Find the event row (rbc-row-segment) within the row
+      const eventRow = eventEl.closest(".rbc-row-segment, [class*=row-segment]");
+      if (!eventRow) return null;
+
+      // Get column index of this event segment
+      const allSegments = Array.from(row.querySelectorAll(".rbc-row-segment, [class*=row-segment]"));
+      // Use offsetLeft to determine column
+      const eventLeft = eventEl.closest(".rbc-row-segment")?.offsetLeft || 0;
+      const rowLeft = row.getBoundingClientRect().left;
+      const rowWidth = row.offsetWidth;
+      const colWidth = rowWidth / 7;
+      const colIdx = Math.round(eventLeft / colWidth);
+
+      // Get date from the date cell at that column index
+      const dateCell = dateCells[colIdx] || dateCells[0];
+      if (!dateCell) return null;
+
+      // Try data-date attribute first
+      if (dateCell.dataset?.date) return dateCell.dataset.date;
+
+      // Try aria-label like "March 10"
+      const aria = dateCell.getAttribute("aria-label") || dateCell.querySelector("[aria-label]")?.getAttribute("aria-label");
+      if (aria) {
+        const m = aria.match(/([A-Za-z]+)\s+(\d+)/);
+        if (m) {
+          const months = ["january","february","march","april","may","june","july","august","september","october","november","december"];
+          const mi = months.indexOf(m[1].toLowerCase());
+          if (mi >= 0) {
+            // Determine year based on month (handle year boundaries)
+            const d = `${yr}-${String(mi+1).padStart(2,"0")}-${String(parseInt(m[2])).padStart(2,"0")}`;
+            return d;
+          }
+        }
+      }
+
+      // Try the link text (just a number) + figure out the date from context
+      const linkText = dateCell.querySelector("a, button")?.textContent?.trim();
+      if (linkText && /^\d{1,2}$/.test(linkText)) {
+        const day = parseInt(linkText);
+        return `${yr}-${String(mo+1).padStart(2,"0")}-${String(day).padStart(2,"0")}`;
+      }
+
+      return null;
+    };
+
+    document.querySelectorAll(".rbc-event-content").forEach(el => {
+      const text = el.innerText?.trim();
+      if (!text || !/^\d{1,2}:\d{2}/.test(text)) return;
+
+      const date = getDateForCell(el);
       if (!date) return;
-      const [cellYr, cellMo] = date.split("-").map(Number);
-      if (cellYr !== yr || cellMo !== mo + 1) return;
 
-      const links = Array.from(cell.querySelectorAll("a[href]")).map(a => ({
-        text: a.innerText.trim(), href: a.href,
-      }));
+      // Confirm this date belongs to our target month
+      const [dYr, dMo] = date.split("-").map(Number);
+      if (dYr !== yr || dMo !== mo + 1) return;
 
-      // Walk every leaf text node inside the cell
-      cell.querySelectorAll("*").forEach(el => {
-        // Skip "+N more" buttons themselves
-        if (/^\+\d+\s*more$/i.test(el.textContent.trim())) return;
-        const line = el.innerText?.trim();
-        if (!line || !/^\d{1,2}:\d{2}/.test(line)) return;
-        // Only leaf-ish nodes (no children with time content)
-        const childHasTime = Array.from(el.children).some(c => /\d{1,2}:\d{2}/.test(c.innerText || ""));
-        if (childHasTime) return;
+      const m = text.match(/^(\d{1,2}:\d{2})\s*[-–]\s*(.+)/);
+      if (!m) return;
+      const time = m[1];
+      const rest = m[2].trim();
+      const mm = rest.match(mapRx);
+      const title = mm ? `${mm[1].trim()} — ${mm[2]}` : rest;
+      if (title.length < 2) return;
 
-        const m = line.match(/^(\d{1,2}:\d{2})\s*[-–]\s*(.+)/);
-        if (!m) return;
-        const time = m[1];
-        const rest = m[2].trim();
-        if (/^\+\d+/.test(rest)) return;
-        const mm = rest.match(mapRx);
-        const title = mm ? `${mm[1].trim()} — ${mm[2]}` : rest;
-        if (title.length < 2) return;
-        const key = `${date}|${time}|${title}`;
-        if (seen.has(key)) return;
-        seen.add(key);
-        const link = links.find(l => l.text.includes(time) || l.text.includes(rest.slice(0, 12)));
-        results.push({ date, time, title, url: link?.href || null });
-      });
+      const key = `${date}|${time}|${title}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+
+      const url = el.closest("a[href]")?.href || null;
+      results.push({ date, time, title, url });
     });
 
     return results;
@@ -188,52 +254,61 @@ async function scrapeMonth(page, targetDate) {
   console.log(`    ${domMatches.length} match(es) from DOM cells`);
   matches.push(...domMatches);
 
-  // ── Pass 2: click "+N more" buttons for overflow events not rendered in the cell ──
-  // Get list of {element, dateStr} pairs for all "+more" buttons
+  // ── Pass 2: click "+N more" buttons (rbc-show-more) for overflow events ──
   const moreBtns = await page.evaluate((yr, mo) => {
-    return Array.from(document.querySelectorAll("*"))
-      .filter(el => el.children.length === 0 && /^\+\d+\s*more$/i.test(el.textContent.trim()))
-      .map(el => {
-        const cell = el.closest("[data-date]");
-        const date = cell?.getAttribute("data-date") || null;
-        if (!date) return null;
-        const [cellYr, cellMo] = date.split("-").map(Number);
-        if (cellYr !== yr || cellMo !== mo + 1) return null;
-        return date;
-      })
-      .filter(Boolean);
+    // rbc uses .rbc-show-more for overflow buttons
+    const btns = Array.from(document.querySelectorAll(".rbc-show-more, [class*=show-more]"))
+      .concat(Array.from(document.querySelectorAll("*"))
+        .filter(el => el.children.length === 0 && /^\+\d+\s*(more)?$/i.test(el.textContent.trim())));
+
+    return btns.map((btn, idx) => {
+      // Find date from parent row structure
+      const row = btn.closest(".rbc-month-row, .rbc-week-row, [class*=rbc-row]");
+      if (!row) return null;
+      const dateCells = Array.from(row.querySelectorAll(".rbc-date-cell, [class*=date-cell]"));
+
+      // Use offsetLeft to determine column
+      const rowWidth = row.offsetWidth;
+      const colWidth = rowWidth / 7;
+      const btnLeft = btn.offsetLeft || btn.getBoundingClientRect().left - row.getBoundingClientRect().left;
+      const colIdx = Math.min(Math.round(btnLeft / colWidth), dateCells.length - 1);
+      const dateCell = dateCells[colIdx] || dateCells[0];
+      if (!dateCell) return null;
+
+      const linkText = dateCell.querySelector("a, button")?.textContent?.trim();
+      if (!linkText || !/^\d{1,2}$/.test(linkText)) return null;
+      const day = parseInt(linkText);
+      const date = `${yr}-${String(mo+1).padStart(2,"0")}-${String(day).padStart(2,"0")}`;
+      return { date, idx };
+    }).filter(Boolean);
   }, yr, mo);
 
   if (moreBtns.length > 0) {
     console.log(`    Clicking ${moreBtns.length} "+more" button(s)...`);
-  }
+    for (const { date: dateStr } of moreBtns) {
+      try {
+        await page.evaluate((yr, mo) => {
+          const btns = Array.from(document.querySelectorAll(".rbc-show-more, [class*=show-more]"))
+            .concat(Array.from(document.querySelectorAll("*"))
+              .filter(el => el.children.length === 0 && /^\+\d+\s*(more)?$/i.test(el.textContent.trim())));
+          if (btns[0]) btns[0].click();
+        }, yr, mo);
 
-  for (const dateStr of moreBtns) {
-    try {
-      // Click the "+more" button for this specific date
-      await page.evaluate((dateStr) => {
-        const cell = document.querySelector(`[data-date="${dateStr}"]`);
-        if (!cell) return;
-        const btn = Array.from(cell.querySelectorAll("*"))
-          .find(el => el.children.length === 0 && /^\+\d+\s*more$/i.test(el.textContent.trim()));
-        if (btn) btn.click();
-      }, dateStr);
+        await new Promise(r => setTimeout(r, 700));
+        const popupMatches = await readOpenPopup(page, dateStr);
 
-      await new Promise(r => setTimeout(r, 700));
-      const popupMatches = await readOpenPopup(page, dateStr);
-
-      // Only add matches that aren't already captured from DOM
-      for (const pm of popupMatches) {
-        const key = `${pm.date}|${pm.time}|${pm.title}`;
-        if (!matches.some(m => `${m.date}|${m.time}|${m.title}` === key)) {
-          matches.push(pm);
+        for (const pm of popupMatches) {
+          const key = `${pm.date}|${pm.time}|${pm.title}`;
+          if (!matches.some(m => `${m.date}|${m.time}|${m.title}` === key)) {
+            matches.push(pm);
+          }
         }
-      }
 
-      await page.keyboard.press("Escape");
-      await new Promise(r => setTimeout(r, 400));
-    } catch (e) {
-      console.log(`    +more error for ${dateStr}: ${e.message}`);
+        await page.keyboard.press("Escape");
+        await new Promise(r => setTimeout(r, 400));
+      } catch (e) {
+        console.log(`    +more error for ${dateStr}: ${e.message}`);
+      }
     }
   }
 
