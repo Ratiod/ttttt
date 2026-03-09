@@ -32,7 +32,7 @@ jobs:
           PRACC_EMAIL:      ${{ secrets.PRACC_EMAIL }}
           PRACC_PASSWORD:   ${{ secrets.PRACC_PASSWORD }}
           MONTHS_AHEAD:     "2"
-        run: node sync-pracc-debug.js
+        run: node sync-pracc.js
 
       - name: Upload debug files
         if: always()
