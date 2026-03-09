@@ -140,6 +140,7 @@ async function scrapePracc() {
       const targetDate = new Date(today.getFullYear(), today.getMonth() + mo, 1);
       const monthLabel = targetDate.toLocaleDateString("en-US", { month: "long", year: "numeric" });
       console.log(`\n  📆 Scraping ${monthLabel}...`);
+      if (mo === 0) await page.screenshot({ path: "pracc-matches.png", fullPage: true });
 
       // Navigate to next month if needed
       if (mo > 0) {
@@ -176,78 +177,69 @@ async function scrapePracc() {
         await new Promise(r => setTimeout(r, 2000));
       }
 
-      // ── Step 3: Extract matches from the page ──
-      const monthMatches = await page.evaluate((yr, mo) => {
-        const results = [];
-        const monthStr = String(mo + 1).padStart(2, "0");
+      // ── Step 3: Click every day cell to open its popup and read matches ──
+      // This is the most reliable approach since pracc hides matches behind "+N more"
+      const daysInMonth = new Date(targetDate.getFullYear(), targetDate.getMonth() + 1, 0).getDate();
+      const monthMatches = [];
 
-        // Strategy 1: look for data-date attributes
-        document.querySelectorAll("[data-date]").forEach(el => {
-          const dateAttr = el.getAttribute("data-date");
-          if (!dateAttr) return;
-          // Find child elements that look like match entries
-          el.querySelectorAll("[class*='match'], [class*='event'], [class*='scrim']").forEach(entry => {
-            const text = entry.innerText?.trim();
-            if (!text) return;
-            const timeMatch = text.match(/(\d{1,2}:\d{2})/);
-            if (!timeMatch) return;
-            const time = timeMatch[1];
-            let title = text.replace(/\d{1,2}:\d{2}\s*[-–]?\s*/, "").trim();
-            // Extract map from end: "Opponent - Map"
-            const mapRx = /\s*[-–]\s*(Split|Haven|Bind|Breeze|Fracture|Icebox|Lotus|Abyss|Sunset|Ascent|Pearl|Corrode)$/i;
-            title = title.replace(mapRx, m => m.replace(/\s*[-–]\s*/, " — ")).trim();
-            if (title.length > 1) results.push({ date: dateAttr, time, title });
+      for (let day = 1; day <= daysInMonth; day++) {
+        try {
+          const dd = String(day).padStart(2, "0");
+          const mm = String(targetDate.getMonth() + 1).padStart(2, "0");
+          const dateStr = `${targetDate.getFullYear()}-${mm}-${dd}`;
+
+          // Click the day cell
+          await page.evaluate((dayNum) => {
+            const allEls = Array.from(document.querySelectorAll('td, div, span'));
+            // Find the element that contains just this day number
+            const el = allEls.find(el => {
+              const txt = el.textContent.trim();
+              return (txt === String(dayNum) || txt === String(dayNum).padStart(2,"0")) &&
+                     el.children.length <= 1 && el.offsetWidth > 15 && el.offsetHeight > 10;
+            });
+            if (el) el.click();
+          }, day);
+
+          await new Promise(r => setTimeout(r, 500));
+
+          // Read popup text — popup shows "Monday, March 9th 2026" then match lines
+          const popupText = await page.evaluate(() => {
+            const allEls = Array.from(document.querySelectorAll('*'));
+            // Find popup: absolutely/fixed positioned, visible, contains time patterns
+            const popup = allEls.find(el => {
+              if (!el.innerText || el.innerText.length < 10) return false;
+              if (!el.innerText.match(/\d{1,2}:\d{2}/)) return false;
+              const s = window.getComputedStyle(el);
+              const z = parseInt(s.zIndex) || 0;
+              return (s.position === "absolute" || s.position === "fixed" || z > 5) &&
+                     el.offsetHeight > 40 && el.offsetWidth > 80;
+            });
+            return popup ? popup.innerText : "";
           });
-        });
 
-        // Strategy 2: look for text lines matching "HH:MM - Opponent - Map"
-        const allText = document.body.innerText;
-        const lines = allText.split("\n").map(l => l.trim()).filter(Boolean);
-
-        // Find date context lines and match entries below them
-        const months = ["january","february","march","april","may","june","july","august","september","october","november","december"];
-        let currentDate = null;
-
-        for (const line of lines) {
-          // Date header? e.g. "Monday, March 9th 2026" or "9" (day number)
-          const fullDate = line.match(/([a-z]+),?\s+([a-z]+)\s+(\d+)(?:st|nd|rd|th)?\s+(\d{4})/i);
-          if (fullDate) {
-            const mi = months.indexOf(fullDate[2].toLowerCase());
-            if (mi >= 0) {
-              const dd = String(parseInt(fullDate[3])).padStart(2, "0");
-              const mm = String(mi + 1).padStart(2, "0");
-              currentDate = `${fullDate[4]}-${mm}-${dd}`;
+          if (popupText) {
+            const lines = popupText.split("\n").map(l => l.trim()).filter(Boolean);
+            for (const line of lines) {
+              const entryRx = line.match(/^(\d{1,2}:\d{2})\s*[-–]\s*(.+)/);
+              if (entryRx) {
+                const time = entryRx[1];
+                let rest = entryRx[2].trim();
+                const mapRx = /^(.+?)\s*[-–]\s*(Split|Haven|Bind|Breeze|Fracture|Icebox|Lotus|Abyss|Sunset|Ascent|Pearl|Corrode)$/i;
+                const mapMatch = rest.match(mapRx);
+                const title = mapMatch ? `${mapMatch[1].trim()} — ${mapMatch[2]}` : rest;
+                if (title.length > 1) monthMatches.push({ date: dateStr, time, title });
+              }
             }
-            continue;
           }
 
-          // Match entry? e.g. "19:00 - NAOS | HK/SG - Split"
-          const entryRx = line.match(/^(\d{1,2}:\d{2})\s*[-–]\s*(.+)/);
-          if (entryRx && currentDate) {
-            const time = entryRx[1];
-            let rest = entryRx[2].trim();
-            const mapRx = /^(.+?)\s*[-–]\s*(Split|Haven|Bind|Breeze|Fracture|Icebox|Lotus|Abyss|Sunset|Ascent|Pearl|Corrode)$/i;
-            const mapMatch = rest.match(mapRx);
-            const title = mapMatch ? `${mapMatch[1].trim()} — ${mapMatch[2]}` : rest;
-            if (title.length > 1) results.push({ date: currentDate, time, title });
-          }
-        }
-
-        // Deduplicate
-        const seen = new Set();
-        return results.filter(r => {
-          const k = `${r.date}|${r.time}|${r.title}`;
-          if (seen.has(k)) return false;
-          seen.add(k); return true;
-        });
-      }, targetDate.getFullYear(), targetDate.getMonth());
+          // Close popup
+          await page.keyboard.press("Escape");
+          await new Promise(r => setTimeout(r, 200));
+        } catch (_) {}
+      }
 
       console.log(`    Found ${monthMatches.length} matches`);
       allMatches.push(...monthMatches);
-
-      // ── Step 4: Click each day to expand "+N more" entries ──
-      const expandedMatches = await expandDayCells(page, targetDate);
-      allMatches.push(...expandedMatches);
     }
 
     await browser.close();
@@ -271,43 +263,55 @@ async function scrapePracc() {
 }
 
 async function expandDayCells(page, targetDate) {
+  // Click each calendar day cell to trigger its popup, then read the match list
   const matches = [];
   const yr = targetDate.getFullYear();
   const mo = targetDate.getMonth();
+  const daysInMonth = new Date(yr, mo + 1, 0).getDate();
 
-  // Find all "+N more" overflow links and click them
-  const overflowLinks = await page.$$('[class*="more"], [class*="overflow"], a:has-text("+")');
-  for (const link of overflowLinks) {
+  for (let day = 1; day <= daysInMonth; day++) {
     try {
-      const text = await link.evaluate(el => el.textContent.trim());
-      if (!text.match(/\+\d+/)) continue;
+      const dd = String(day).padStart(2, "0");
+      const mm = String(mo + 1).padStart(2, "0");
+      const dateStr = `${yr}-${mm}-${dd}`;
 
-      await link.click();
+      // Click the day number cell
+      const clicked = await page.evaluate((dayNum, yr, mo) => {
+        // Find day cells — look for elements containing just the day number
+        const allEls = Array.from(document.querySelectorAll('*'));
+        const dayEl = allEls.find(el => {
+          if (el.children.length > 3) return false;
+          const txt = el.textContent.trim();
+          return txt === String(dayNum) && el.offsetWidth > 20;
+        });
+        if (dayEl) { dayEl.click(); return true; }
+        return false;
+      }, day, yr, mo);
+
+      if (!clicked) continue;
       await new Promise(r => setTimeout(r, 500));
 
-      // Find the popup/modal that appeared
-      const popup = await page.$('[class*="popup"], [class*="modal"], [class*="expanded"], [class*="dropdown"]');
-      if (!popup) continue;
-
-      const popupMatches = await popup.evaluate((el, yr, mo) => {
+      // Read the popup — look for the date header "Monday, March 9th 2026" style
+      const popupMatches = await page.evaluate((dateStr) => {
         const results = [];
-        const lines = el.innerText.split("\n").map(l => l.trim()).filter(Boolean);
         const months = ["january","february","march","april","may","june","july","august","september","october","november","december"];
-        let dateStr = null;
 
+        // Find the popup element — it usually contains the date as a header
+        const allEls = Array.from(document.querySelectorAll('*'));
+        const popup = allEls.find(el => {
+          const s = window.getComputedStyle(el);
+          return el.innerText?.includes(":") &&
+                 (s.position === "absolute" || s.position === "fixed" || parseInt(s.zIndex) > 5) &&
+                 el.offsetHeight > 40 && el.offsetWidth > 100;
+        });
+
+        const text = popup ? popup.innerText : "";
+        if (!text) return results;
+
+        const lines = text.split("\n").map(l => l.trim()).filter(Boolean);
         for (const line of lines) {
-          const fullDate = line.match(/([a-z]+),?\s+([a-z]+)\s+(\d+)(?:st|nd|rd|th)?\s+(\d{4})/i);
-          if (fullDate) {
-            const mi = months.indexOf(fullDate[2].toLowerCase());
-            if (mi >= 0) {
-              const dd = String(parseInt(fullDate[3])).padStart(2, "0");
-              const mm = String(mi + 1).padStart(2, "0");
-              dateStr = `${fullDate[4]}-${mm}-${dd}`;
-            }
-            continue;
-          }
           const entryRx = line.match(/^(\d{1,2}:\d{2})\s*[-–]\s*(.+)/);
-          if (entryRx && dateStr) {
+          if (entryRx) {
             const time = entryRx[1];
             let rest = entryRx[2].trim();
             const mapRx = /^(.+?)\s*[-–]\s*(Split|Haven|Bind|Breeze|Fracture|Icebox|Lotus|Abyss|Sunset|Ascent|Pearl|Corrode)$/i;
@@ -317,9 +321,13 @@ async function expandDayCells(page, targetDate) {
           }
         }
         return results;
-      }, yr, mo);
+      }, dateStr);
 
-      matches.push(...popupMatches);
+      if (popupMatches.length > 0) {
+        console.log(`    Day ${dateStr}: ${popupMatches.length} matches from popup`);
+        matches.push(...popupMatches);
+      }
+
       await page.keyboard.press("Escape");
       await new Promise(r => setTimeout(r, 300));
     } catch (_) {}
