@@ -23,13 +23,35 @@ const MAPS = ["Split","Haven","Bind","Breeze","Fracture","Icebox","Lotus","Abyss
 const MAP_RX = new RegExp(`^(.+?)\\s*[-–]\\s*(${MAPS.join("|")})$`, "i");
 
 // ── Tracker API ──
+
+// Reads the response as text first, then tries to parse JSON.
+// If parsing fails or the status isn't ok, throws an error that includes
+// the status code and raw body so failures are diagnosable instead of
+// surfacing as a bare "Unexpected end of JSON input".
+async function safeJson(res, label) {
+  const raw = await res.text();
+  let data = null;
+  if (raw) {
+    try { data = JSON.parse(raw); } catch (e) {
+      throw new Error(`${label}: non-JSON response (status ${res.status}): ${raw.slice(0, 300)}`);
+    }
+  }
+  if (!res.ok) {
+    throw new Error(`${label}: HTTP ${res.status} — ${raw ? raw.slice(0, 300) : "(empty body)"}`);
+  }
+  if (data === null) {
+    throw new Error(`${label}: empty response body (status ${res.status})`);
+  }
+  return data;
+}
+
 async function getTrackerToken() {
   const res = await fetch(`${CONFIG.TRACKER_URL}/auth/login`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ username: CONFIG.TRACKER_USERNAME, password: CONFIG.TRACKER_PASSWORD }),
   });
-  const data = await res.json();
+  const data = await safeJson(res, "Tracker login failed");
   if (!data.token) throw new Error(`Tracker login failed: ${JSON.stringify(data)}`);
   console.log("✓ Logged into tracker");
   return data.token;
@@ -39,7 +61,7 @@ async function getExistingEvents(token) {
   const res = await fetch(`${CONFIG.TRACKER_URL}/api/events`, {
     headers: { Authorization: `Bearer ${token}` },
   });
-  return res.json();
+  return safeJson(res, "getExistingEvents failed");
 }
 
 async function postEvent(token, event) {
@@ -48,14 +70,18 @@ async function postEvent(token, event) {
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
     body: JSON.stringify(event),
   });
-  return res.json();
+  return safeJson(res, `postEvent failed (${event.title})`);
 }
 
 async function deleteEvent(token, id) {
-  await fetch(`${CONFIG.TRACKER_URL}/api/events/${id}`, {
+  const res = await fetch(`${CONFIG.TRACKER_URL}/api/events/${id}`, {
     method: "DELETE",
     headers: { Authorization: `Bearer ${token}` },
   });
+  if (!res.ok) {
+    const raw = await res.text().catch(() => "");
+    console.warn(`  ⚠️  deleteEvent(${id}) failed: HTTP ${res.status} ${raw.slice(0, 200)}`);
+  }
 }
 
 // ── Next month button ──
@@ -428,13 +454,19 @@ async function sync() {
   console.log("➕ Syncing matches to tracker...\n");
   for (const m of praccMatches) {
     if (m.date < today) continue;
-    const r = await postEvent(token, {
-      title: m.title, date: m.date, time: m.time,
-      cat: "Pracc", color: PRACC_COLOR, url: m.url || null,
-    });
-    if (r.id) {
-      console.log(`  ✓ ${m.date}  ${m.time}  ${m.title}`);
-      added++;
+    try {
+      const r = await postEvent(token, {
+        title: m.title, date: m.date, time: m.time,
+        cat: "Pracc", color: PRACC_COLOR, url: m.url || null,
+      });
+      if (r.id) {
+        console.log(`  ✓ ${m.date}  ${m.time}  ${m.title}`);
+        added++;
+      } else {
+        console.warn(`  ⚠️  No id returned for ${m.title}: ${JSON.stringify(r)}`);
+      }
+    } catch (e) {
+      console.warn(`  ⚠️  Failed to post "${m.title}": ${e.message}`);
     }
   }
 
