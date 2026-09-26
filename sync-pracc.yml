@@ -1,9 +1,9 @@
 name: Sync Pracc Matches
 
 on:
-  # Run every day at 8:00 AM UTC (adjust to your timezone)
+  # Run every day at 7:00 AM UTC = 3:00 PM Malaysia time (UTC+8)
   schedule:
-    - cron: '0 8 * * *'
+    - cron: '0 7 * * *'
 
   # Also lets you trigger it manually from GitHub UI anytime
   workflow_dispatch:
