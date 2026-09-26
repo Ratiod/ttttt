@@ -308,10 +308,31 @@ async function scrapePracc() {
     console.log("📅 Loading matches calendar...");
     await page.goto("https://pracc.com/matches", { waitUntil: "networkidle2", timeout: 30000 });
     await new Promise(r => setTimeout(r, 3000));
+
+    // "Show Past Matches" is a per-session checkbox that defaults to OFF
+    // for a fresh headless login, which hides most of the current month
+    // once "today" has passed. Turn it on so past + upcoming both render.
+    const pastToggled = await page.evaluate(() => {
+      const labels = Array.from(document.querySelectorAll("label, span, div"));
+      const target = labels.find(el => el.textContent.trim() === "Show Past Matches");
+      if (!target) return false;
+      // The checkbox is usually a sibling/child <input type="checkbox">
+      const container = target.closest("label") || target.parentElement;
+      const checkbox = container?.querySelector('input[type="checkbox"]');
+      if (checkbox && !checkbox.checked) { checkbox.click(); return true; }
+      if (checkbox && checkbox.checked) return "already-on";
+      // Fallback: some UI kits render a clickable div instead of a real checkbox
+      target.click();
+      return "clicked-label";
+    });
+    console.log(`  🕓 Show Past Matches: ${pastToggled}`);
+    await new Promise(r => setTimeout(r, 1500));
+
     if (CONFIG.DEBUG) await page.screenshot({ path: "pracc-matches.png", fullPage: true });
 
     const allMatches = [];
     const today = new Date();
+
 
     for (let mo = 0; mo <= CONFIG.MONTHS_AHEAD; mo++) {
       const targetDate = new Date(today.getFullYear(), today.getMonth() + mo, 1);
@@ -443,7 +464,8 @@ async function sync() {
 
   const existing = await getExistingEvents(token);
   const today = new Date().toISOString().slice(0, 10);
-  const oldPracc = existing.filter(e => e.cat === "Pracc" && e.date >= today);
+  const monthStart = today.slice(0, 8) + "01"; // first day of current month
+  const oldPracc = existing.filter(e => e.cat === "Pracc" && e.date >= monthStart);
 
   if (oldPracc.length > 0) {
     console.log(`🗑  Removing ${oldPracc.length} old Pracc events...`);
@@ -453,7 +475,7 @@ async function sync() {
   let added = 0;
   console.log("➕ Syncing matches to tracker...\n");
   for (const m of praccMatches) {
-    if (m.date < today) continue;
+    if (m.date < monthStart) continue;
     try {
       const r = await postEvent(token, {
         title: m.title, date: m.date, time: m.time,
