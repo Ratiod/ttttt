@@ -14,7 +14,7 @@ const CONFIG = {
   TRACKER_PASSWORD: process.env.TRACKER_PASSWORD || "",
   PRACC_EMAIL:      process.env.PRACC_EMAIL      || "",
   PRACC_PASSWORD:   process.env.PRACC_PASSWORD   || "",
-  MONTHS_AHEAD:     0, // current month only
+  MONTHS_AHEAD:     parseInt(process.env.MONTHS_AHEAD || "0", 10),
   DEBUG:            process.env.DEBUG === "true",
 };
 
@@ -182,28 +182,17 @@ async function scrapeMonth(page, targetDate) {
           const text = eventContent.innerText?.trim();
           if (!text || !/^\d{1,2}:\d{2}/.test(text)) return;
 
-          // Use the segment's index position within the row to find its column.
-          // Each rbc-row-segment has a style like "left: X%; width: Y%"
-          // Parse left% to get column index (each column = 100/7 %)
-          const style = segment.getAttribute("style") || "";
-          const leftMatch = style.match(/left:\s*([\d.]+)%/);
-          let colIdx = 0;
-          if (leftMatch) {
-            colIdx = Math.round(parseFloat(leftMatch[1]) / (100 / 7));
-          } else {
-            // Fallback: use index in parent
-            colIdx = allSegments.indexOf(segment);
-          }
+          // Work out the column from the segment's real on-screen position.
+          // (rbc segments use flex-basis, not left%, and empty gaps are
+          // collapsed into one spacer segment, so index-in-parent is wrong.)
+          const segRect = segment.getBoundingClientRect();
+          const rowRect = rowContent.getBoundingClientRect();
+          let colIdx = Math.floor((segRect.left - rowRect.left + colWidth * 0.5) / colWidth);
           colIdx = Math.max(0, Math.min(colIdx, 6));
 
-          // Try exact column, then scan neighbors
-          let dateStr = colToDate[colIdx];
-          if (!dateStr) {
-            for (let delta = 1; delta <= 6; delta++) {
-              if (colToDate[colIdx - delta]) { dateStr = colToDate[colIdx - delta]; break; }
-              if (colToDate[colIdx + delta]) { dateStr = colToDate[colIdx + delta]; break; }
-            }
-          }
+          // Exact column only. If it's an off-range day (prev/next month),
+          // skip it rather than guessing a neighbouring date.
+          const dateStr = colToDate[colIdx];
           if (!dateStr) return;
 
           const m = text.match(/^(\d{1,2}:\d{2})\s*[-–]\s*(.+)/);
@@ -369,8 +358,8 @@ async function scrapePracc() {
           if (!dateCells.length) return;
           const rowWidth = rowContent.offsetWidth;
           const colWidth = rowWidth / 7;
-          const btnLeft = btn.offsetLeft;
-          const colIdx = Math.min(Math.round(btnLeft / colWidth), 6);
+          const btnLeft = btn.getBoundingClientRect().left - rowContent.getBoundingClientRect().left;
+          const colIdx = Math.max(0, Math.min(Math.floor((btnLeft + colWidth * 0.5) / colWidth), 6));
           // Find nearest non-off-range cell
           const allCells = Array.from(dateRow.querySelectorAll(".rbc-date-cell"));
           const cell = allCells[colIdx];
@@ -396,7 +385,7 @@ async function scrapePracc() {
                 const dateRow = rowContent?.querySelector(":scope > .rbc-row");
                 const cells = Array.from(dateRow?.querySelectorAll(".rbc-date-cell") || []);
                 const rowWidth = rowContent?.offsetWidth || 1;
-                const colIdx = Math.min(Math.round(btn.offsetLeft / (rowWidth / 7)), 6);
+                const colIdx = Math.max(0, Math.min(Math.floor(((btn.getBoundingClientRect().left - rowContent.getBoundingClientRect().left) + (rowWidth / 14)) / (rowWidth / 7)), 6));
                 const cell = cells[colIdx];
                 const dayNum = parseInt(cell?.textContent?.trim());
                 const d = `${yr}-${String(mo + 1).padStart(2, "0")}-${String(dayNum).padStart(2, "0")}`;
