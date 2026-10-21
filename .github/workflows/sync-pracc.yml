@@ -1,16 +1,19 @@
 name: Sync Pracc Matches
 
 on:
-  # Run every day at 8:00 AM UTC (adjust to your timezone)
-  schedule:
-    - cron: '0 8 * * *'
-
+  # Triggered every 15 min by cron-job.org via the GitHub API
   # Also lets you trigger it manually from GitHub UI anytime
   workflow_dispatch:
+
+# Don't let a slow run overlap the next one
+concurrency:
+  group: pracc-sync
+  cancel-in-progress: false
 
 jobs:
   sync:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
 
     steps:
       - name: Checkout repo
@@ -33,13 +36,3 @@ jobs:
           PRACC_PASSWORD:   ${{ secrets.PRACC_PASSWORD }}
           MONTHS_AHEAD:     "2"
         run: node sync-pracc.js
-
-      - name: Upload debug files
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: pracc-debug
-          path: |
-            *.png
-            *.html
-          if-no-files-found: ignore
