@@ -70,7 +70,7 @@ async function postEvent(token, event) {
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
     body: JSON.stringify(event),
   });
-  return safeJson(res, `postEvent failed (${event.title})`);
+  return safeJson(res, `postEvent failed (${event.date} ${event.time})`);
 }
 
 async function deleteEvent(token, id) {
@@ -340,7 +340,6 @@ async function scrapePracc() {
       // Pass 1: direct DOM read
       const monthMatches = await scrapeMonth(page, targetDate);
       console.log(`    ${monthMatches.length} match(es) from calendar`);
-      monthMatches.forEach(m => console.log(`    ✓ ${m.date}  ${m.time}  ${m.title}`));
       allMatches.push(...monthMatches);
 
       // Pass 2: +more overflow buttons
@@ -400,7 +399,7 @@ async function scrapePracc() {
               if (!existingKeys.has(key)) {
                 existingKeys.add(key);
                 allMatches.push(pm);
-                console.log(`    ✓ ${pm.date}  ${pm.time}  ${pm.title}  (via +more)`);
+                console.log(`    ✓ ${pm.date}  ${pm.time}  (via +more)`);
               }
             }
             await page.keyboard.press("Escape");
@@ -478,13 +477,13 @@ async function sync() {
         cat: "Pracc", color: PRACC_COLOR, url: m.url || null,
       });
       if (r.id) {
-        console.log(`  ✓ ${m.date}  ${m.time}  ${m.title}`);
+        console.log(`  ✓ ${m.date}  ${m.time}`);
         added++;
       } else {
-        console.warn(`  ⚠️  No id returned for ${m.title}: ${JSON.stringify(r)}`);
+        console.warn(`  ⚠️  No id returned for ${m.date} ${m.time}: ${JSON.stringify(r)}`);
       }
     } catch (e) {
-      console.warn(`  ⚠️  Failed to post "${m.title}": ${e.message}`);
+      console.warn(`  ⚠️  Failed to post ${m.date} ${m.time}: ${e.message}`);
     }
   }
 
