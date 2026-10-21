@@ -9,7 +9,7 @@
 const puppeteer = require("puppeteer");
 
 const CONFIG = {
-  TRACKER_URL:      process.env.TRACKER_URL      || "https://tracker2-ten.vercel.app",
+  TRACKER_URL:      process.env.TRACKER_URL      || "https://tracker2-amx2.vercel.app",
   TRACKER_USERNAME: process.env.TRACKER_USERNAME || "admin",
   TRACKER_PASSWORD: process.env.TRACKER_PASSWORD || "",
   PRACC_EMAIL:      process.env.PRACC_EMAIL      || "",
@@ -454,17 +454,24 @@ async function sync() {
   const existing = await getExistingEvents(token);
   const today = new Date().toISOString().slice(0, 10);
   const monthStart = today.slice(0, 8) + "01"; // first day of current month
+  const keyOf = e => `${e.date}|${String(e.time || "").slice(0, 5)}|${e.title}`;
   const oldPracc = existing.filter(e => e.cat === "Pracc" && e.date >= monthStart);
+  const scraped = praccMatches.filter(m => m.date >= monthStart);
 
-  if (oldPracc.length > 0) {
-    console.log(`🗑  Removing ${oldPracc.length} old Pracc events...`);
-    for (const ev of oldPracc) await deleteEvent(token, ev.id);
+  const scrapedKeys = new Set(scraped.map(keyOf));
+  const existingKeys = new Set(oldPracc.map(keyOf));
+
+  const toDelete = oldPracc.filter(e => !scrapedKeys.has(keyOf(e)));
+  const toAdd = scraped.filter(m => !existingKeys.has(keyOf(m)));
+
+  if (toDelete.length > 0) {
+    console.log(`🗑  Removing ${toDelete.length} stale Pracc events...`);
+    for (const ev of toDelete) await deleteEvent(token, ev.id);
   }
 
   let added = 0;
-  console.log("➕ Syncing matches to tracker...\n");
-  for (const m of praccMatches) {
-    if (m.date < monthStart) continue;
+  console.log(`➕ Adding ${toAdd.length} new matches (${scraped.length - toAdd.length} unchanged)...\n`);
+  for (const m of toAdd) {
     try {
       const r = await postEvent(token, {
         title: m.title, date: m.date, time: m.time,
@@ -481,7 +488,7 @@ async function sync() {
     }
   }
 
-  console.log(`\n🎉 Done! ${added} matches synced to your tracker calendar.\n`);
+  console.log(`\n🎉 Done! +${added} added, -${toDelete.length} removed.\n`);
 }
 
 sync().catch(err => {
